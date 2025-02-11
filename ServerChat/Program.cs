@@ -14,12 +14,12 @@ class Programme
     {
         TcpListener serveur = new TcpListener(IPAddress.Any, 8000);
         serveur.Start();
-        Console.WriteLine("Serveur demarre sur le port 8000");
+        Console.WriteLine("[INFO] Serveur démarré sur le port 8000...");
 
         while (true)
         {
             TcpClient client = serveur.AcceptTcpClient();
-            Console.WriteLine("Nouveau client connecte");
+            Console.WriteLine($"[NOUVELLE CONNEXION] Un client s'est connecté depuis {((IPEndPoint)client.Client.RemoteEndPoint).Address}");
 
             // Demander le nom d'utilisateur
             NetworkStream flux = client.GetStream();
@@ -27,9 +27,19 @@ class Programme
             int octetsLus = flux.Read(tampon, 0, tampon.Length);
             string username = Encoding.UTF8.GetString(tampon, 0, octetsLus).Trim();
 
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                Console.WriteLine("[AVERTISSEMENT] Connexion rejetée : nom d'utilisateur vide.");
+                client.Close();
+                continue;
+            }
+
             // Ajouter le client à la liste avec son nom d'utilisateur
             clients.Add((client, username));
-            Console.WriteLine($"{username} a rejoint le chat.");
+            Console.WriteLine($"[INFO] {username} ({((IPEndPoint)client.Client.RemoteEndPoint).Address}) a rejoint le chat.");
+
+            // Annoncer l'arrivée du nouvel utilisateur à tous
+            DiffuserMessage($"[SERVEUR] {username} a rejoint le chat.", null);
 
             Thread threadClient = new(() => GererClient(client, username));
             threadClient.Start();
@@ -38,35 +48,52 @@ class Programme
 
     static void GererClient(TcpClient client, string username)
     {
-        NetworkStream flux = client.GetStream();
-        byte[] tampon = new byte[1024];
-        int octetsLus;
-
-        while ((octetsLus = flux.Read(tampon, 0, tampon.Length)) != 0)
+        try
         {
-            string message = Encoding.UTF8.GetString(tampon, 0, octetsLus);
-            Console.WriteLine($"Reçu de {username}: {message}");
+            NetworkStream flux = client.GetStream();
+            byte[] tampon = new byte[1024];
+            int octetsLus;
 
-            // Diffuser le message en incluant le nom d'utilisateur
-            DiffuserMessage($"{username}: {message}", client);
+            while ((octetsLus = flux.Read(tampon, 0, tampon.Length)) != 0)
+            {
+                string message = Encoding.UTF8.GetString(tampon, 0, octetsLus).Trim();
+                Console.WriteLine($"[MESSAGE] {username}: {message}");
+
+                // Diffuser le message en incluant le nom d'utilisateur
+                DiffuserMessage($"{username}: {message}", client);
+            }
         }
-
-        // Lorsque le client se déconnecte
-        clients.RemoveAll(c => c.client == client);
-        client.Close();
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ERREUR] Problème avec {username}: {ex.Message}");
+        }
+        finally
+        {
+            // Lorsque le client se déconnecte
+            clients.RemoveAll(c => c.client == client);
+            Console.WriteLine($"[INFO] {username} s'est déconnecté.");
+            DiffuserMessage($"[SERVEUR] {username} a quitté le chat.", null);
+            client.Close();
+        }
     }
 
     static void DiffuserMessage(string message, TcpClient expediteur)
     {
         byte[] messageOctets = Encoding.UTF8.GetBytes(message);
 
-        // Diffuser le message à tous les clients sauf à l'expéditeur
         foreach (var client in clients)
         {
-            if (client.client != expediteur)
+            try
             {
-                NetworkStream flux = client.client.GetStream();
-                flux.Write(messageOctets, 0, messageOctets.Length);
+                if (client.client != expediteur)
+                {
+                    NetworkStream flux = client.client.GetStream();
+                    flux.Write(messageOctets, 0, messageOctets.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERREUR] Impossible d'envoyer un message à {client.username}: {ex.Message}");
             }
         }
     }
