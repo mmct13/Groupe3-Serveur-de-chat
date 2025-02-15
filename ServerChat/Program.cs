@@ -7,8 +7,9 @@ using System.Threading;
 
 class Programme
 {
-    // Liste des clients connectés et leurs noms d'utilisateur
-    static List<(TcpClient client, string username)> clients = new List<(TcpClient, string)>();
+    static readonly List<(TcpClient client, string username)> clients = new();
+    static readonly object verrouClients = new();
+    static readonly int maxClients = 5;
 
     static void Main(string[] args)
     {
@@ -19,9 +20,27 @@ class Programme
         while (true)
         {
             TcpClient client = serveur.AcceptTcpClient();
-            Console.WriteLine($"[NOUVELLE CONNEXION] Un client s'est connecté depuis {((IPEndPoint)client.Client.RemoteEndPoint).Address}");
 
-            // Demander le nom d'utilisateur
+            lock (verrouClients)
+            {
+                if (clients.Count >= maxClients)
+                {
+                    Console.WriteLine("[AVERTISSEMENT] Connexion refusée : limite de clients atteinte.");
+                    client.Close();
+                    continue;
+                }
+            }
+
+            Console.WriteLine($"[NOUVELLE CONNEXION] Client depuis {((IPEndPoint)client.Client.RemoteEndPoint).Address}");
+            Thread threadClient = new(() => GérerNouvelleConnexion(client));
+            threadClient.Start();
+        }
+    }
+
+    static void GérerNouvelleConnexion(TcpClient client)
+    {
+        try
+        {
             NetworkStream flux = client.GetStream();
             byte[] tampon = new byte[1024];
             int octetsLus = flux.Read(tampon, 0, tampon.Length);
@@ -31,22 +50,26 @@ class Programme
             {
                 Console.WriteLine("[AVERTISSEMENT] Connexion rejetée : nom d'utilisateur vide.");
                 client.Close();
-                continue;
+                return;
             }
 
-            // Ajouter le client à la liste avec son nom d'utilisateur
-            clients.Add((client, username));
-            Console.WriteLine($"[INFO] {username} ({((IPEndPoint)client.Client.RemoteEndPoint).Address}) a rejoint le chat.");
+            lock (verrouClients)
+            {
+                clients.Add((client, username));
+            }
 
-            // Annoncer l'arrivée du nouvel utilisateur à tous
+            Console.WriteLine($"[INFO] {username} a rejoint le chat.");
             DiffuserMessage($"[SERVEUR] {username} a rejoint le chat.", null);
-
-            Thread threadClient = new(() => GererClient(client, username));
-            threadClient.Start();
+            GérerClient(client, username);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ERREUR] Problème de connexion : {ex.Message}");
+            client.Close();
         }
     }
 
-    static void GererClient(TcpClient client, string username)
+    static void GérerClient(TcpClient client, string username)
     {
         try
         {
@@ -57,10 +80,8 @@ class Programme
             while ((octetsLus = flux.Read(tampon, 0, tampon.Length)) != 0)
             {
                 string message = Encoding.UTF8.GetString(tampon, 0, octetsLus).Trim();
-                Console.WriteLine($"[MESSAGE] {username}: {message}");
-
-                // Diffuser le message en incluant le nom d'utilisateur
-                DiffuserMessage($"{username}: {message}", client);
+                Console.WriteLine($"[MESSAGE] {message}");
+                DiffuserMessage($" {message}", client);
             }
         }
         catch (Exception ex)
@@ -69,8 +90,11 @@ class Programme
         }
         finally
         {
-            // Lorsque le client se déconnecte
-            clients.RemoveAll(c => c.client == client);
+            lock (verrouClients)
+            {
+                clients.RemoveAll(c => c.client == client);
+            }
+
             Console.WriteLine($"[INFO] {username} s'est déconnecté.");
             DiffuserMessage($"[SERVEUR] {username} a quitté le chat.", null);
             client.Close();
@@ -81,19 +105,22 @@ class Programme
     {
         byte[] messageOctets = Encoding.UTF8.GetBytes(message);
 
-        foreach (var client in clients)
+        lock (verrouClients)
         {
-            try
+            foreach (var client in clients)
             {
-                if (client.client != expediteur)
+                try
                 {
-                    NetworkStream flux = client.client.GetStream();
-                    flux.Write(messageOctets, 0, messageOctets.Length);
+                    if (client.client != expediteur)
+                    {
+                        NetworkStream flux = client.client.GetStream();
+                        flux.Write(messageOctets, 0, messageOctets.Length);
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ERREUR] Impossible d'envoyer un message à {client.username}: {ex.Message}");
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERREUR] Envoi à {client.username} échoué : {ex.Message}");
+                }
             }
         }
     }
